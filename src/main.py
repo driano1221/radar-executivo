@@ -1,6 +1,7 @@
 import requests
 import statistics
 import json
+import sys
 from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÕES DE PERFIL (Lead Data Scientist) ---
@@ -10,30 +11,40 @@ KEYWORDS_TECNICAS = [
     'Otimização de Processos', 'Fomento à Pesquisa', 'IA'
 ]
 
+# Aumentando o timeout para 30 segundos para maior resiliência em ambientes de CI
+TIMEOUT_GLOBAL = 30
+
 def get_historical_sgs(codigo, dias=180):
     """Busca série histórica do Bacen (SGS) para análise estatística."""
     url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/{dias}"
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, timeout=TIMEOUT_GLOBAL)
         if response.status_code == 200:
             data = response.json()
             return [float(x['valor']) for x in data]
-    except Exception:
-        pass
+        else:
+            print(f"⚠️ Erro HTTP {response.status_code} ao buscar série {codigo}", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Falha na conexão com Bacen (Série {codigo}): {str(e)}", file=sys.stderr)
     return []
 
 def get_awesome_api_data():
     """Busca Dólar, Bitcoin e Ouro via AwesomeAPI (pública e estável)."""
     url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,BTC-BRL,XAU-BRL"
     try:
-        res = requests.get(url, timeout=10).json()
-        return {
-            "USD": float(res['USDBRL']['bid']),
-            "BTC": float(res['BTCBRL']['bid']),
-            "GOLD": float(res['XAUBRL']['bid'])
-        }
-    except Exception:
-        return {}
+        response = requests.get(url, timeout=TIMEOUT_GLOBAL)
+        if response.status_code == 200:
+            res = response.json()
+            return {
+                "USD": float(res['USDBRL']['bid']),
+                "BTC": float(res['BTCBRL']['bid']),
+                "GOLD": float(res['XAUBRL']['bid'])
+            }
+        else:
+            print(f"⚠️ Erro HTTP {response.status_code} na AwesomeAPI", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Falha na conexão com AwesomeAPI: {str(e)}", file=sys.stderr)
+    return {}
 
 def analyze_assets():
     """Camada 1: Análise de Anomalias Multi-Asset."""
@@ -46,7 +57,6 @@ def analyze_assets():
             mean = statistics.mean(vals)
             stdev = statistics.stdev(vals) if len(vals) > 1 else 0.1
             z_score = (current - mean) / stdev if stdev > 0 else 0
-            # Alerta se desvio > 2 ou se for o IPCA (qualquer variação no IPCA é relevante)
             status = "⚠️ Anomalia" if abs(z_score) > 2 else "✅ Estável"
             assets.append({"Ativo": name, "Valor": f"{current}%", "Status": status, "Z-Score": round(z_score, 2)})
 
@@ -55,7 +65,6 @@ def analyze_assets():
     for key, name in [("USD", "Dólar"), ("BTC", "Bitcoin"), ("GOLD", "Ouro")]:
         if key in awesome:
             val = awesome[key]
-            # No Radar V3, monitoramos volatilidade 24h para ativos de mercado
             assets.append({"Ativo": name, "Valor": f"R$ {val:,.2f}", "Status": "✅ Estável", "Z-Score": "N/A"})
     
     return assets
@@ -67,7 +76,7 @@ def get_leads_v3():
     
     leads = []
     try:
-        response = requests.get(url_pncp, timeout=15)
+        response = requests.get(url_pncp, timeout=TIMEOUT_GLOBAL)
         if response.status_code == 200:
             contratos = response.json().get('data', [])
             for c in contratos:
@@ -87,8 +96,10 @@ def get_leads_v3():
                                 "link": f"https://pncp.gov.br/app/contratos/{c.get('cnpjOrgao')}/{c.get('anoContrato')}/{c.get('numeroContrato')}"
                             })
                             break
-    except Exception:
-        pass
+        else:
+            print(f"⚠️ Erro HTTP {response.status_code} no PNCP", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Falha na conexão com PNCP: {str(e)}", file=sys.stderr)
     return leads
 
 def main():
@@ -96,15 +107,18 @@ def main():
     leads = get_leads_v3()
     
     now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
-    md = [f"# 🚀 Radar Executivo v3.0 | {now_str}"]
+    md = [f"# 🚀 Radar Executivo v3.1 | {now_str}"]
     md.append("\n---")
     
     # Seção 1: Mercado
     md.append("## 💰 Inteligência de Mercado (Multi-Asset)")
-    md.append("| Ativo | Valor Atual | Status | Z-Score (6m) |")
-    md.append("| :--- | :--- | :--- | :--- |")
-    for a in assets:
-        md.append(f"| {a['Ativo']} | {a['Valor']} | {a['Status']} | {a['Z-Score']} |")
+    if not assets:
+        md.append("> ⚠️ Erro na conexão com as APIs financeiras no momento da execução.")
+    else:
+        md.append("| Ativo | Valor Atual | Status | Z-Score (6m) |")
+        md.append("| :--- | :--- | :--- | :--- |")
+        for a in assets:
+            md.append(f"| {a['Ativo']} | {a['Valor']} | {a['Status']} | {a['Z-Score']} |")
     
     # Seção 2: Carreira
     md.append("\n## 💼 Prospecção Ativa (MG, SP, RJ)")
@@ -118,7 +132,7 @@ def main():
             
     # Seção 3: To-Do
     md.append("\n## ✅ Ações Recomendadas")
-    if any(a['Status'] == "⚠️ Anomalia" for a in assets):
+    if any(a.get('Status') == "⚠️ Anomalia" for a in assets):
         md.append("- [ ] **Financeiro:** Revisar alocação. Detectada anomalia estatística (>2σ) em indicadores macro.")
     if leads:
         md.append(f"- [ ] **Carreira:** Enviar portfólio customizado para os {len(leads)} leads do PNCP.")
