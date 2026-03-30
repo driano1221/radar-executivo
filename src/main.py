@@ -2,6 +2,7 @@ import requests
 import statistics
 import json
 import sys
+import time
 from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÕES DE PERFIL (Lead Data Scientist) ---
@@ -11,39 +12,55 @@ KEYWORDS_TECNICAS = [
     'Otimização de Processos', 'Fomento à Pesquisa', 'IA'
 ]
 
-# Aumentando o timeout para 30 segundos para maior resiliência em ambientes de CI
+# Configurações de Rede e Resiliência
 TIMEOUT_GLOBAL = 30
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) RadarExecutivo/3.2'
+}
 
 def get_historical_sgs(codigo, dias=180):
     """Busca série histórica do Bacen (SGS) para análise estatística."""
-    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/{dias}"
+    # Tentativa com formato JSON explícito
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/{dias}?formato=json"
     try:
-        response = requests.get(url, timeout=TIMEOUT_GLOBAL)
+        response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
         if response.status_code == 200:
             data = response.json()
-            return [float(x['valor']) for x in data]
+            # Filtrar valores válidos (BCB às vezes retorna strings vazias ou nulas)
+            vals = []
+            for x in data:
+                try:
+                    vals.append(float(x['valor']))
+                except (ValueError, TypeError):
+                    continue
+            return vals
         else:
-            print(f"⚠️ Erro HTTP {response.status_code} ao buscar série {codigo}", file=sys.stderr)
+            print(f"⚠️ Erro HTTP {response.status_code} ao buscar série {codigo} no Bacen", file=sys.stderr)
     except Exception as e:
         print(f"❌ Falha na conexão com Bacen (Série {codigo}): {str(e)}", file=sys.stderr)
     return []
 
 def get_awesome_api_data():
-    """Busca Dólar, Bitcoin e Ouro via AwesomeAPI (pública e estável)."""
+    """Busca Dólar, Bitcoin e Ouro via AwesomeAPI com Retry para erro 429."""
     url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,BTC-BRL,XAU-BRL"
-    try:
-        response = requests.get(url, timeout=TIMEOUT_GLOBAL)
-        if response.status_code == 200:
-            res = response.json()
-            return {
-                "USD": float(res['USDBRL']['bid']),
-                "BTC": float(res['BTCBRL']['bid']),
-                "GOLD": float(res['XAUBRL']['bid'])
-            }
-        else:
-            print(f"⚠️ Erro HTTP {response.status_code} na AwesomeAPI", file=sys.stderr)
-    except Exception as e:
-        print(f"❌ Falha na conexão com AwesomeAPI: {str(e)}", file=sys.stderr)
+    for attempt in range(2):
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
+            if response.status_code == 200:
+                res = response.json()
+                return {
+                    "USD": float(res['USDBRL']['bid']),
+                    "BTC": float(res['BTCBRL']['bid']),
+                    "GOLD": float(res['XAUBRL']['bid'])
+                }
+            elif response.status_code == 429:
+                print(f"⚠️ Rate limit (429) na AwesomeAPI. Tentativa {attempt+1}/2. Aguardando 5s...", file=sys.stderr)
+                time.sleep(5)
+            else:
+                print(f"⚠️ Erro HTTP {response.status_code} na AwesomeAPI", file=sys.stderr)
+        except Exception as e:
+            print(f"❌ Falha na conexão com AwesomeAPI: {str(e)}", file=sys.stderr)
+            break
     return {}
 
 def analyze_assets():
@@ -76,9 +93,10 @@ def get_leads_v3():
     
     leads = []
     try:
-        response = requests.get(url_pncp, timeout=TIMEOUT_GLOBAL)
+        response = requests.get(url_pncp, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
         if response.status_code == 200:
-            contratos = response.json().get('data', [])
+            data = response.json()
+            contratos = data.get('data', []) if isinstance(data, dict) else []
             for c in contratos:
                 uf = c.get('orgaoEntidade', {}).get('uf', '')
                 objeto = str(c.get('objeto', '')).upper()
@@ -96,6 +114,9 @@ def get_leads_v3():
                                 "link": f"https://pncp.gov.br/app/contratos/{c.get('cnpjOrgao')}/{c.get('anoContrato')}/{c.get('numeroContrato')}"
                             })
                             break
+        elif response.status_code == 404:
+            # 404 no PNCP muitas vezes significa "nenhum dado para esta data"
+            print(f"ℹ️ PNCP (404): Sem contratos registrados para {ontem}.", file=sys.stderr)
         else:
             print(f"⚠️ Erro HTTP {response.status_code} no PNCP", file=sys.stderr)
     except Exception as e:
@@ -107,7 +128,7 @@ def main():
     leads = get_leads_v3()
     
     now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
-    md = [f"# 🚀 Radar Executivo v3.1 | {now_str}"]
+    md = [f"# 🚀 Radar Executivo v3.2 | {now_str}"]
     md.append("\n---")
     
     # Seção 1: Mercado
