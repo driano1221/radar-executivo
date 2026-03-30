@@ -1,0 +1,43 @@
+name: Radar Diário de Carreira e Investimentos
+
+on:
+  schedule:
+    # 10:00 UTC é 07:00 BRT (Horário de Brasília)
+    # Roda de Segunda a Sexta (1-5)
+    - cron: '0 10 * * 1-5'
+  workflow_dispatch: # Permite rodar manualmente se precisar
+
+jobs:
+  executar-radar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Rodar Radar Diário e Gerar Relatórios
+        run: |
+          python src/main.py
+
+      - name: Criar Dashboard no GitHub Actions
+        run: |
+          cat relatorio.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload do Relatório como Artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-radar-${{ github.run_number }}
+          path: |
+            relatorio.md
+            relatorio_diario.txt
+          if-no-files-found: ignore
+          retention-days: 7
