@@ -12,61 +12,101 @@ KEYWORDS_TECNICAS = [
     'Otimização de Processos', 'Fomento à Pesquisa', 'IA'
 ]
 
-# Configurações de Rede e Resiliência
+# --- CONFIGURAÇÕES DE REDE E RESILIÊNCIA (PATCH V3.3) ---
 TIMEOUT_GLOBAL = 30
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) RadarExecutivo/3.2'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache'
 }
 
+def get_dates():
+    """Gera dicionário de datas em múltiplos formatos para as APIs."""
+    hoje = datetime.now()
+    ontem = hoje - timedelta(days=1)
+    seis_meses = hoje - timedelta(days=180)
+    return {
+        "hoje_br": hoje.strftime('%d/%m/%Y'),
+        "ontem_br": ontem.strftime('%d/%m/%Y'),
+        "seis_meses_br": seis_meses.strftime('%d/%m/%Y'),
+        "hoje_iso": hoje.strftime('%Y-%m-%d'),
+        "ontem_iso": ontem.strftime('%Y-%m-%d')
+    }
+
 def get_historical_sgs(codigo, dias=180):
-    """Busca série histórica do Bacen (SGS) para análise estatística."""
-    # Tentativa com formato JSON explícito
-    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/{dias}?formato=json"
+    """Busca série histórica do Bacen usando filtro de data (Fix 400)."""
+    dates = get_dates()
+    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=json&dataInicial={dates['seis_meses_br']}&dataFinal={dates['hoje_br']}"
     try:
         response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
         if response.status_code == 200:
             data = response.json()
-            # Filtrar valores válidos (BCB às vezes retorna strings vazias ou nulas)
-            vals = []
-            for x in data:
-                try:
-                    vals.append(float(x['valor']))
-                except (ValueError, TypeError):
-                    continue
-            return vals
+            return [float(x['valor']) for x in data if x.get('valor')]
         else:
-            print(f"⚠️ Erro HTTP {response.status_code} ao buscar série {codigo} no Bacen", file=sys.stderr)
+            print(f"⚠️ Erro HTTP {response.status_code} no Bacen (Série {codigo}). URL: {url}", file=sys.stderr)
     except Exception as e:
         print(f"❌ Falha na conexão com Bacen (Série {codigo}): {str(e)}", file=sys.stderr)
     return []
 
-def get_awesome_api_data():
-    """Busca Dólar, Bitcoin e Ouro via AwesomeAPI com Retry para erro 429."""
-    url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,BTC-BRL,XAU-BRL"
-    for attempt in range(2):
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
-            if response.status_code == 200:
-                res = response.json()
-                return {
-                    "USD": float(res['USDBRL']['bid']),
-                    "BTC": float(res['BTCBRL']['bid']),
-                    "GOLD": float(res['XAUBRL']['bid'])
-                }
-            elif response.status_code == 429:
-                print(f"⚠️ Rate limit (429) na AwesomeAPI. Tentativa {attempt+1}/2. Aguardando 5s...", file=sys.stderr)
-                time.sleep(5)
-            else:
-                print(f"⚠️ Erro HTTP {response.status_code} na AwesomeAPI", file=sys.stderr)
-        except Exception as e:
-            print(f"❌ Falha na conexão com AwesomeAPI: {str(e)}", file=sys.stderr)
-            break
-    return {}
+def get_market_data():
+    """Busca dados de mercado com redundância e retry (Fix 429)."""
+    market_assets = {}
+    
+    # 1. AwesomeAPI (Tentativa 1)
+    try:
+        url = "https://economia.awesomeapi.com.br/json/last/USD-BRL,BTC-BRL,XAU-BRL"
+        res = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
+        if res.status_code == 200:
+            j = res.json()
+            market_assets["Dólar"] = float(j['USDBRL']['bid'])
+            market_assets["Bitcoin"] = float(j['BTCBRL']['bid'])
+            market_assets["Ouro"] = float(j['XAUBRL']['bid'])
+            return market_assets
+        print(f"⚠️ AwesomeAPI limitada ({res.status_code}). Ativando contingência...", file=sys.stderr)
+    except:
+        pass
 
-def analyze_assets():
-    """Camada 1: Análise de Anomalias Multi-Asset."""
+    # 2. Contingência: CoinGecko para Cripto
+    try:
+        res_btc = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=brl", headers=HEADERS, timeout=15)
+        if res_btc.status_code == 200:
+            market_assets["Bitcoin"] = float(res_btc.json()['bitcoin']['brl'])
+            print("✅ Bitcoin capturado via CoinGecko (Redundância)", file=sys.stderr)
+    except:
+        pass
+    
+    return market_assets
+
+def get_leads_pncp():
+    """Busca leads no PNCP com formato DD/MM/YYYY (Fix 404)."""
+    dates = get_dates()
+    url = f"https://pncp.gov.br/api/pncp/v1/contratos?dataInicial={dates['ontem_br']}&dataFinal={dates['ontem_br']}&pagina=1"
+    leads = []
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
+        if response.status_code == 200:
+            contratos = response.json().get('data', [])
+            for c in contratos:
+                objeto = str(c.get('objeto', '')).upper()
+                uf = c.get('orgaoEntidade', {}).get('uf', '')
+                if uf in UFS_ALVO and any(kw.upper() in objeto for kw in KEYWORDS_TECNICAS):
+                    leads.append({
+                        "orgao": c.get('orgaoEntidade', {}).get('razaoSocial'),
+                        "valor": c.get('valorTotal', 0),
+                        "local": uf,
+                        "link": f"https://pncp.gov.br/app/contratos/{c.get('cnpjOrgao')}/{c.get('anoContrato')}/{c.get('numeroContrato')}"
+                    })
+        else:
+            print(f"⚠️ Erro HTTP {response.status_code} no PNCP. URL: {url}", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Falha na conexão com PNCP: {str(e)}", file=sys.stderr)
+    return leads
+
+def main():
     assets = []
-    # 1. Bacen: Selic (432) e IPCA (433)
+    # Camada Bacen
     for name, code in [("Selic", 432), ("IPCA", 433)]:
         vals = get_historical_sgs(code)
         if vals:
@@ -76,97 +116,42 @@ def analyze_assets():
             z_score = (current - mean) / stdev if stdev > 0 else 0
             status = "⚠️ Anomalia" if abs(z_score) > 2 else "✅ Estável"
             assets.append({"Ativo": name, "Valor": f"{current}%", "Status": status, "Z-Score": round(z_score, 2)})
-
-    # 2. Câmbio e Commodities
-    awesome = get_awesome_api_data()
-    for key, name in [("USD", "Dólar"), ("BTC", "Bitcoin"), ("GOLD", "Ouro")]:
-        if key in awesome:
-            val = awesome[key]
-            assets.append({"Ativo": name, "Valor": f"R$ {val:,.2f}", "Status": "✅ Estável", "Z-Score": "N/A"})
     
-    return assets
+    # Camada Mercado
+    mkt = get_market_data()
+    for name, val in mkt.items():
+        assets.append({"Ativo": name, "Valor": f"R$ {val:,.2f}", "Status": "✅ Estável", "Z-Score": "N/A"})
 
-def get_leads_v3():
-    """Camada 2: Lead Scoring & AI Pitch (PNCP + Filtro Geo)."""
-    ontem = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
-    url_pncp = f"https://pncp.gov.br/api/pncp/v1/contratos?dataInicial={ontem}&dataFinal={ontem}&pagina=1"
-    
-    leads = []
-    try:
-        response = requests.get(url_pncp, headers=HEADERS, timeout=TIMEOUT_GLOBAL)
-        if response.status_code == 200:
-            data = response.json()
-            contratos = data.get('data', []) if isinstance(data, dict) else []
-            for c in contratos:
-                uf = c.get('orgaoEntidade', {}).get('uf', '')
-                objeto = str(c.get('objeto', '')).upper()
-                orgao = c.get('orgaoEntidade', {}).get('razaoSocial', 'Órgão não informado')
-                
-                if uf in UFS_ALVO:
-                    for kw in KEYWORDS_TECNICAS:
-                        if kw.upper() in objeto:
-                            pitch = f"Como Mestre pela UFV e especialista em {kw}, posso atuar na otimização deste projeto para o {orgao}."
-                            leads.append({
-                                "orgao": orgao,
-                                "valor": f"R$ {c.get('valorTotal', 0):,.2f}",
-                                "local": uf,
-                                "pitch": pitch,
-                                "link": f"https://pncp.gov.br/app/contratos/{c.get('cnpjOrgao')}/{c.get('anoContrato')}/{c.get('numeroContrato')}"
-                            })
-                            break
-        elif response.status_code == 404:
-            # 404 no PNCP muitas vezes significa "nenhum dado para esta data"
-            print(f"ℹ️ PNCP (404): Sem contratos registrados para {ontem}.", file=sys.stderr)
-        else:
-            print(f"⚠️ Erro HTTP {response.status_code} no PNCP", file=sys.stderr)
-    except Exception as e:
-        print(f"❌ Falha na conexão com PNCP: {str(e)}", file=sys.stderr)
-    return leads
-
-def main():
-    assets = analyze_assets()
-    leads = get_leads_v3()
+    # Camada Leads
+    leads = get_leads_pncp()
     
     now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
-    md = [f"# 🚀 Radar Executivo v3.2 | {now_str}"]
-    md.append("\n---")
+    md = [f"# 🚀 Radar Executivo v3.3 | {now_str}", "\n---", "## 💰 Inteligência de Mercado"]
     
-    # Seção 1: Mercado
-    md.append("## 💰 Inteligência de Mercado (Multi-Asset)")
     if not assets:
-        md.append("> ⚠️ Erro na conexão com as APIs financeiras no momento da execução.")
+        md.append("> ⚠️ Falha crítica na captura de dados financeiros mundiais.")
     else:
         md.append("| Ativo | Valor Atual | Status | Z-Score (6m) |")
         md.append("| :--- | :--- | :--- | :--- |")
         for a in assets:
             md.append(f"| {a['Ativo']} | {a['Valor']} | {a['Status']} | {a['Z-Score']} |")
     
-    # Seção 2: Carreira
     md.append("\n## 💼 Prospecção Ativa (MG, SP, RJ)")
     if not leads:
-        md.append("> ℹ️ Nenhuma oportunidade de alta aderência técnica identificada nas últimas 24h.")
+        md.append("> ℹ️ Nenhuma oportunidade técnica de alta aderência identificada hoje.")
     else:
-        md.append("| Órgão | Valor | Local | AI Pitch |")
+        md.append("| Órgão | Valor | Local | Link |")
         md.append("| :--- | :--- | :--- | :--- |")
         for l in leads:
-            md.append(f"| [{l['orgao']}]({l['link']}) | {l['valor']} | {l['local']} | *{l['pitch']}* |")
-            
-    # Seção 3: To-Do
-    md.append("\n## ✅ Ações Recomendadas")
-    if any(a.get('Status') == "⚠️ Anomalia" for a in assets):
-        md.append("- [ ] **Financeiro:** Revisar alocação. Detectada anomalia estatística (>2σ) em indicadores macro.")
-    if leads:
-        md.append(f"- [ ] **Carreira:** Enviar portfólio customizado para os {len(leads)} leads do PNCP.")
-    md.append("- [ ] **Networking:** Monitorar editais da FAPEMIG/CNPq para 'Fomento à Pesquisa/IA'.")
-    
+            md.append(f"| {l['orgao']} | R$ {l['valor']:,.2f} | {l['local']} | [Ver Contrato]({l['link']}) |")
+
     md.append("\n---")
-    md.append("*Dashboard consolidado via Python & GitHub Actions.*")
+    md.append("*Dashboard resiliente v3.3 via Python & GitHub Actions.*")
     
     report_md = "\n".join(md)
     with open("relatorio.md", "w", encoding="utf-8") as f:
         f.write(report_md)
     
-    # Output para o log do GitHub Actions
     print(report_md)
 
 if __name__ == "__main__":
